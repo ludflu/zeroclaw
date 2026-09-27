@@ -633,19 +633,48 @@ pub fn create_memory_with_storage_and_routes(
         }
     }
 
+    build_memory_with_storage(
+        config,
+        active_storage,
+        workspace_dir,
+        Some(&resolved_embedding),
+    )
+}
+
+/// Build the selected backend without the runtime startup maintenance above.
+/// Operator commands use this path without runtime startup maintenance.
+/// SQLite/Lucid imports omit the configured embedder so they cannot reconcile
+/// vectors or send embedding requests.
+fn build_memory_with_storage(
+    config: &MemoryConfig,
+    active_storage: ActiveStorage<'_>,
+    workspace_dir: &Path,
+    resolved_embedding: Option<&ResolvedEmbeddingConfig>,
+) -> anyhow::Result<Box<dyn Memory>> {
+    let backend_name = backend_kind_from_dotted(&config.backend);
+    let backend_kind = classify_memory_backend(&backend_name);
+
+    fn create_embedder(
+        resolved_embedding: Option<&ResolvedEmbeddingConfig>,
+    ) -> Arc<dyn embeddings::EmbeddingProvider> {
+        match resolved_embedding {
+            Some(resolved) => Arc::from(embeddings::create_embedding_provider(
+                &resolved.model_provider,
+                resolved.api_key.as_deref(),
+                &resolved.model,
+                resolved.dimensions,
+            )),
+            None => Arc::new(embeddings::NoopEmbedding),
+        }
+    }
+
     fn build_sqlite_memory(
         config: &MemoryConfig,
         sqlite_open_timeout_secs: Option<u64>,
         workspace_dir: &Path,
-        resolved_embedding: &ResolvedEmbeddingConfig,
+        resolved_embedding: Option<&ResolvedEmbeddingConfig>,
     ) -> anyhow::Result<SqliteMemory> {
-        let embedder: Arc<dyn embeddings::EmbeddingProvider> =
-            Arc::from(embeddings::create_embedding_provider(
-                &resolved_embedding.model_provider,
-                resolved_embedding.api_key.as_deref(),
-                &resolved_embedding.model,
-                resolved_embedding.dimensions,
-            ));
+        let embedder = create_embedder(resolved_embedding);
         let has_embedder = embedder.dimensions() > 0;
 
         #[allow(clippy::cast_possible_truncation)]
@@ -660,7 +689,9 @@ pub fn create_memory_with_storage_and_routes(
             config.search_mode.clone(),
         )?;
 
-        if has_embedder {
+        if let Some(resolved_embedding) = resolved_embedding
+            && has_embedder
+        {
             reconcile_embedding_identity(
                 &mem,
                 &embeddings::EmbeddingIdentity {
@@ -696,13 +727,7 @@ pub fn create_memory_with_storage_and_routes(
             .context("Qdrant memory backend requires `url` in [storage.qdrant.<alias>]")?;
         let collection = qdrant_cfg.collection.clone();
         let qdrant_api_key = qdrant_cfg.api_key.clone().filter(|s| !s.trim().is_empty());
-        let embedder: Arc<dyn embeddings::EmbeddingProvider> =
-            Arc::from(embeddings::create_embedding_provider(
-                &resolved_embedding.model_provider,
-                resolved_embedding.api_key.as_deref(),
-                &resolved_embedding.model,
-                resolved_embedding.dimensions,
-            ));
+        let embedder = create_embedder(resolved_embedding);
         ::zeroclaw_log::record!(
             INFO,
             ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note),
@@ -747,7 +772,7 @@ pub fn create_memory_with_storage_and_routes(
             config,
             sqlite_open_timeout_secs,
             workspace_dir,
-            &resolved_embedding,
+            resolved_embedding,
         )?;
         return wrap_scanned_and_audit(
             build_lucid_memory(workspace_dir, local, active_storage),
@@ -765,7 +790,7 @@ pub fn create_memory_with_storage_and_routes(
                 config,
                 sqlite_open_timeout_secs,
                 workspace_dir,
-                &resolved_embedding,
+                resolved_embedding,
             )
         },
         "",
@@ -922,11 +947,10 @@ pub fn create_memory_for_migration(config: &Config) -> anyhow::Result<Box<dyn Me
     // Migration writes also bypass the audit trail: the imported rows are
     // bulk history, not live memory operations.
     //
-    // Routed uniformly through `create_memory_with_storage_and_routes` (the
-    // same factory the running daemon uses) rather than the sqlite-only
-    // `create_memory_with_builders` helper, so backends that need resolved
-    // storage config — Postgres, Qdrant — are supported here too instead of
-    // erroring out from `memory list`/`get`/`stats`/`clear`.
+    // Share storage-aware backend construction with the runtime, but not its
+    // hygiene or snapshot startup behavior. Qdrant needs the configured
+    // dimensions to initialize a fresh collection for operator reads; the
+    // import caller rejects Qdrant, so only SQLite/Lucid omit the embedder.
     let mut operator_config = config.memory.clone();
     operator_config.policy = MemoryPolicyConfig {
         threat_scan_on_hit: "block-on-read".into(),
@@ -935,13 +959,21 @@ pub fn create_memory_for_migration(config: &Config) -> anyhow::Result<Box<dyn Me
     };
     operator_config.audit_enabled = false;
 
-    create_memory_with_storage_and_routes(
+    let qdrant_embedding = matches!(classify_memory_backend(&backend), MemoryBackendKind::Qdrant)
+        .then(|| {
+            resolve_embedding_config(
+                &operator_config,
+                &config.embedding_routes,
+                None,
+                Some(&config.providers.models),
+            )
+        });
+
+    build_memory_with_storage(
         &operator_config,
-        &config.embedding_routes,
         config.resolve_active_storage(),
         &config.data_dir,
-        None,
-        Some(&config.providers.models),
+        qdrant_embedding.as_ref(),
     )
 }
 
