@@ -2154,9 +2154,9 @@ store_timeout_ms = 40000
     /// list`/`get`/`stats`/`clear`) must support Postgres and Qdrant, not
     /// just sqlite/lucid/markdown — those two backends need resolved
     /// `[storage.*]` config that the old sqlite-only builder path had no way
-    /// to supply, so `create_memory_for_migration` used to hard-error for
-    /// them (see the now-removed `create_memory_with_builders` postgres/
-    /// qdrant bail arms). Qdrant construction is lazy (no server contact),
+    /// to supply, so `create_memory_for_migration` used to follow the
+    /// `create_memory_with_builders` postgres/qdrant bail arms. Qdrant
+    /// construction is lazy (no server contact),
     /// so this exercises success end-to-end without a live server; Postgres
     /// connects eagerly and is covered instead by
     /// `migration_factory_postgres_without_storage_alias_errors` below,

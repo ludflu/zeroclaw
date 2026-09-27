@@ -635,7 +635,7 @@ mod tests {
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&requests);
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
+        let server = zeroclaw_spawn::spawn!(async move {
             loop {
                 tokio::select! {
                     _ = &mut stop_rx => break,
